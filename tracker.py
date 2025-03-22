@@ -760,85 +760,184 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 
 # URL & Keyword Management
 
+# Scheduler
+scheduler = BackgroundScheduler()
 
 @app.post("/track-rank")
-async def track_rank(domain: str = Form(...), keywords: str = Form(...), country: str = Form(...), db: Session = Depends(get_db)):
+async def track_rank(
+    project_id: int = Form(...),
+    domain: str = Form(...),
+    keywords: str = Form(...),
+    country: str = Form(...),
+    db: Session = Depends(get_db)
+):
     try:
-        keyword_list = {k.strip() for k in keywords.split(",")[:500]}  # Remove duplicates
-        existing_url = db.query(URL).filter(URL.url == domain).first()
+        keyword_list = [k.strip() for k in keywords.split(",")[:500]]
+
+        # Get correct Google domain based on country
+        country_lower = country.lower().strip()
+        google_domain = COUNTRY_GOOGLE_DOMAINS.get(country_lower, "google.com")  # Default to google.com
+
+        existing_url = db.query(URL).filter(URL.url == domain, URL.project_id == project_id).first()
         if not existing_url:
-            existing_url = URL(url=domain)
+            existing_url = URL(url=domain, project_id=project_id)
             db.add(existing_url)
             db.commit()
             db.refresh(existing_url)
 
         for keyword in keyword_list:
-            existing_keyword = db.query(Keyword).filter(Keyword.keyword == keyword, Keyword.url_id == existing_url.id).first()
+            existing_keyword = db.query(Keyword).filter(
+                Keyword.keyword == keyword, Keyword.project_id == project_id
+            ).first()
             if not existing_keyword:
-                existing_keyword = Keyword(keyword=keyword, url_id=existing_url.id)
+                existing_keyword = Keyword(keyword=keyword, project_id=project_id)
                 db.add(existing_keyword)
                 db.commit()
                 db.refresh(existing_keyword)
 
-        return {"message": "Tracking initialized"}
+            # Fetch rank from SerpAPI using the correct country Google domain
+            serp_api_key = "serp_api_key"
+            search_url = f"https://serpapi.com/search?api_key={serp_api_key}&q={quote_plus(keyword)}&hl=en&gl={country_lower}&num=100&google_domain={google_domain}"
+            
+            response = requests.get(search_url)
+            
+            if response.status_code != 200:
+                return {"error": "Failed to fetch data from SerpAPI"}
+
+            data = response.json()
+            
+            rank = -1
+            page_number = -1
+
+            if "organic_results" in data:
+                for i, result in enumerate(data["organic_results"], start=1):
+                    result_url = result.get("link", "").strip()
+                    if not result_url:
+                        continue  # Skip if no link available
+
+                    parsed_result_url = urlparse(result_url).netloc.replace("www.", "")
+                    parsed_stored_url = urlparse(domain).netloc.replace("www.", "")
+
+                    if parsed_stored_url in parsed_result_url:
+                        rank = i
+                        page_number = (i - 1) // 10 + 1
+                        break
+
+            # Save the rank in the database
+            new_rank = Rank(
+                url_id=existing_url.id,
+                keyword_id=existing_keyword.id,
+                project_id=project_id,
+                ranks=rank,
+                page_number=page_number,
+                country=country_lower,
+                date=datetime.utcnow()
+            )
+            db.add(new_rank)
+            db.commit()
+
+        return {"message": "Tracking initialized and rankings updated"}
     except Exception as e:
         return {"error": str(e)}
 
-# Scheduler
-scheduler = BackgroundScheduler()
-
-def is_matching_url(target_url, search_result_url):
-    target_domain = urlparse(target_url).netloc.replace("www.", "")
-    result_domain = urlparse(search_result_url).netloc.replace("www.", "")
-    return target_domain == result_domain
 
 def update_ranks():
     db = SessionLocal()
-    urls = db.query(URL).all()
-    serp_api_key = "d53f7f80a087a80b1362792798e575d8a36149a0b42cf70d96c05a0c6a36f6af"
+    try:
+        projects = db.query(Project).all()
+        for project in projects:
+            urls = db.query(URL).filter(URL.project_id == project.id).all()
+            for url in urls:
+                keywords = db.query(Keyword).filter(Keyword.project_id == project.id).all()
+                for keyword in keywords:
+                    track_rank(project_id=project.id, domain=url.url, keywords=keyword.keyword, country="india", db=db)
+    finally:
+        db.close()
 
-    for url in urls:
-        for keyword in url.keywords:
-            print(f"🔍 Checking Rank for: {url.url} - {keyword.keyword}")
 
-            search_url = f"https://serpapi.com/search?api_key={serp_api_key}&q={keyword.keyword}&hl=en&gl=us&num=100"
-            response = requests.get(search_url).json()
-
-            rank = None
-            page_number = None
-            for i, result in enumerate(response.get("organic_results", []), start=1):
-                if is_matching_url(url.url, result.get("link", "")):
-                    rank = i
-                    page_number = (i - 1) // 10 + 1
-                    print(f"✅ Rank Found: {rank} (Page {page_number})")
-                    break
-
-            if rank is None:
-                print(f"❌ No Rank Found for {keyword.keyword}")
-
-            # Store rank in DB
-            existing_keyword = db.query(Keyword).filter(Keyword.id == keyword.id).first()
-            if existing_keyword:
-                new_rank = Rank(url_id=url.id, keyword_id=existing_keyword.id, ranks=rank or -1, page_number=page_number or -1)
-                db.add(new_rank)
-                db.commit()
-                print(f"📌 Rank inserted: {url.url} - {keyword.keyword} => Rank: {rank} (Page {page_number})")
-
-    db.close()
-
-# Schedule rank updates daily
 scheduler.add_job(update_ranks, 'cron', hour=6, minute=0)
 scheduler.start()
-print("🚀 Scheduler started! Runs daily at 6:00 AM.")
+print(" Scheduler started! Runs daily at 6:00 AM.")
 
-# Manual Rank Update API
-@app.post("/manual-update-ranks")
+@app.post("/update-ranks")
 def manual_update_ranks():
     try:
         update_ranks()
-        return {"message": "Ranks updated manually"}
+        return {"message": "Ranks updated successfully"}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/get-ranks")
+async def get_ranks(project_id: int, db: Session = Depends(get_db)):
+    ranks = db.query(Rank).filter(Rank.project_id == project_id).all()
+    if not ranks:
+        return {"message": "No rank data found"}
+
+    result = [{"url": rank.url.url, "keyword": rank.keyword.keyword, "ranks": rank.ranks, "page_number": rank.page_number, "country": rank.country, "date": rank.date.strftime("%Y-%m-%d")} for rank in ranks]
+
+    return result
+
+@app.post("/add-keywords")
+async def add_keywords(
+    project_id: int = Form(...),
+    domain: str = Form(...),
+    keywords: str = Form(...),
+    country: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        keyword_list = [k.strip() for k in keywords.split(",")[:500]]
+        country_lower = country.lower().strip()
+        google_domain = COUNTRY_GOOGLE_DOMAINS.get(country_lower, "google.com")
+
+        existing_url = db.query(URL).filter(URL.url == domain, URL.project_id == project_id).first()
+        if not existing_url:
+            return {"error": "URL not found in the project"}
+
+        for keyword in keyword_list:
+            existing_keyword = db.query(Keyword).filter(
+                Keyword.keyword == keyword, Keyword.project_id == project_id
+            ).first()
+            if existing_keyword:
+                # Insert a new entry with the same URL but a new keyword
+                new_entry = Rank(
+                    url_id=existing_url.id,
+                    keyword_id=existing_keyword.id,
+                    project_id=project_id,
+                    country=country_lower,
+                    date=datetime.utcnow()
+                )
+                db.add(new_entry)
+                db.commit()
+                db.refresh(new_entry)
+                return {"message": "New keyword added for the existing URL", "id": new_entry.id}
+            else:
+                # Create new keyword and then add rank entry
+                new_keyword = Keyword(keyword=keyword, project_id=project_id)
+                db.add(new_keyword)
+                db.commit()
+                db.refresh(new_keyword)
+
+                new_entry = Rank(
+                    url_id=existing_url.id,
+                    keyword_id=new_keyword.id,
+                    project_id=project_id,
+                    country=country_lower,
+                    date=datetime.utcnow()
+                )
+                db.add(new_entry)
+                db.commit()
+                db.refresh(new_entry)
+                return {"message": "New keyword added for the existing URL", "id": new_entry.id}
+
+        return {"message": "Keywords added successfully"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
+
+
 
 # Get stored ranks (Supports multiple keywords correctly)
 @app.get("/get-ranks")
@@ -847,7 +946,7 @@ async def get_ranks(db: Session = Depends(get_db)):
         ranks = db.query(Rank).all()
 
         if not ranks:
-            print("🚨 No rank data found in database!")
+            print(" No rank data found in database!")
             return {"message": "No rank data found"}
 
         result = []
@@ -863,10 +962,10 @@ async def get_ranks(db: Session = Depends(get_db)):
                 "date": rank.date.strftime("%Y-%m-%d")
             })
 
-        print("✅ Ranks Fetched Successfully")
+        print(" Ranks Fetched Successfully")
         return result
     except Exception as e:
-        print(f"❌ ERROR in /get-ranks: {e}")
+        print(f"ERROR in /get-ranks: {e}")
         return {"error": str(e)}
 
 @app.get("/visualize-ranks")
