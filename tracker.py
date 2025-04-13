@@ -16,13 +16,29 @@ import os
 import time
 from openpyxl import Workbook
 from openpyxl.styles import Font
-from datetime import datetime
+from datetime import datetime,timedelta
 from fastapi import APIRouter
+from fastapi import Form
+from fastapi import Body
+from starlette.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from starlette.requests import Request
+import logging
+from iso3166 import countries
+app = FastAPI()
+import pycountry
+if not os.path.exists("static"):
+    os.makedirs("static")
+
+templates = Jinja2Templates(directory="templates")
 # Database Configuration
-DB_USER = "root"
-DB_PASSWORD = "Sowmya@21"
+DB_USER = "user_name"
+DB_PASSWORD = " password"
 DB_HOST = "localhost"
-MASTER_DB = "rank_db"
+MASTER_DB = "db_name"
 
 # Encode password to handle special characters
 encoded_password = quote_plus(DB_PASSWORD)
@@ -30,8 +46,8 @@ DATABASE_URL = f"mysql+mysqlconnector://{DB_USER}:{encoded_password}@{DB_HOST}/{
 
 engine = create_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
+Base = declarative_base()
 # Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -52,39 +68,49 @@ class Project(Base):
     project_name = Column(String(255), index=True, nullable=False)
     project_description = Column(String(255), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"),nullable=False)
-    author = Column(String(255), nullable=False)
+    country = Column(String(10), nullable=True)
     user = relationship("User", back_populates="projects")
-    url_keywords = relationship("URLKeyword", back_populates="project")
-
+    urls = relationship("URL", back_populates="project")
 
 class URL(Base):
     __tablename__ = "urls"
     id = Column(Integer, primary_key=True, index=True)
-    url = Column(String, unique=True, index=True)
-    keywords = relationship("Keyword", back_populates="url")
+    url = Column(String, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"))
+    country = Column(String, nullable=False)
+    project = relationship("Project", back_populates="urls")
     ranks = relationship("Rank", back_populates="url")
+    keywords = relationship("Keyword", back_populates="url")
+    __table_args__ = (Index('idx_unique_url_per_project', 'url', 'project_id', unique=True),)
 
 class Keyword(Base):
     __tablename__ = "keywords"
     id = Column(Integer, primary_key=True, index=True)
     keyword = Column(String, index=True)
-    url_id = Column(Integer, ForeignKey("urls.id"))
-    url = relationship("URL", back_populates="keywords")
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"))
+    
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"), nullable=False)
+    
+    url = relationship("URL", back_populates="keywords") 
     ranks = relationship("Rank", back_populates="keyword")
+
+    __table_args__ = (Index('idx_unique_keyword_per_project', 'keyword', 'project_id', unique=True),)
 
 class Rank(Base):
     __tablename__ = "ranks"
     id = Column(Integer, primary_key=True, index=True)
-    url_id = Column(Integer, ForeignKey("urls.id"))
-    keyword_id = Column(Integer, ForeignKey("keywords.id"))
-    ranks = Column(Integer)  # Fixed: renamed from rank to ranks
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"))
+    keyword_id = Column(Integer, ForeignKey("keywords.id", ondelete="CASCADE"))
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"))
+    ranks = Column(Integer)
     page_number = Column(Integer)
-    date= Column(DateTime, default=datetime.utcnow)
-    
+    country = Column(String, nullable=False)
+    date = Column(DateTime, default=datetime.utcnow)
+
     url = relationship("URL", back_populates="ranks")
     keyword = relationship("Keyword", back_populates="ranks")
 
-    table_args = (Index('idx_url_keyword_date', 'url_id', 'keyword_id', 'date'),)
+    __table_args__ = (Index('idx_url_keyword_project', 'url_id', 'keyword_id', 'project_id', unique=True),)
 # Pydantic Schemas
 class UserCreate(BaseModel):
     name: str
@@ -93,29 +119,24 @@ class UserCreate(BaseModel):
     password: str
 
 class LoginSchema(BaseModel):
-    name: str
+    email_id: EmailStr
     password: str
 
 class ProjectCreate(BaseModel):
     project_name: str
     project_description: str
-    author:str
+    user_id:int
 
-class URLKeywordCreate(BaseModel):
+
+class TrackRankRequest(BaseModel):
     project_id: int
-    url: str
-    keyword: str
+    urls: list[str]
+    keywords: list[str]
+    country: str
 
 # FastAPI App
 app = FastAPI()
 bcrypt._about_ = {"_version_": "4.0.1"}
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React frontend URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 def get_db():
     db = SessionLocal()
@@ -127,200 +148,165 @@ OUTPUT_DIR = "output_files"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Single SERPAPI Key
-SERP_API_KEY = "d53f7f80a087a80b1362792798e575d8a36149a0b42cf70d96c05a0c6a36f6af"
+SERP_API_KEY = "Serp_api_key"
 
 # Country Mapping
 country_domains = {
-    "Afghanistan": "google.com.af",
-    "Albania": "google.al",
-    "Algeria": "google.dz",
-    "Andorra": "google.ad",
-    "Angola": "google.co.ao",
-    "Argentina": "google.com.ar",
-    "Armenia": "google.am",
-    "Australia": "google.com.au",
-    "Austria": "google.at",
-    "Azerbaijan": "google.az",
-    "Bahamas": "google.bs",
-    "Bahrain": "google.com.bh",
-    "Bangladesh": "google.com.bd",
-    "Barbados": "google.com.bb",
-    "Belarus": "google.by",
-    "Belgium": "google.be",
-    "Belize": "google.com.bz",
-    "Benin": "google.bj",
-    "Bhutan": "google.bt",
-    "Bolivia": "google.com.bo",
-    "Bosnia and Herzegovina": "google.ba",
-    "Botswana": "google.co.bw",
-    "Brazil": "google.com.br",
-    "Brunei": "google.com.bn",
-    "Bulgaria": "google.bg",
-    "Burkina Faso": "google.bf",
-    "Burundi": "google.bi",
-    "Cambodia": "google.com.kh",
-    "Cameroon": "google.cm",
-    "Canada": "google.ca",
-    "Cape Verde": "google.cv",
-    "Central African Republic": "google.cf",
-    "Chad": "google.td",
-    "Chile": "google.cl",
-    "China": "google.cn",
-    "Colombia": "google.com.co",
-    "Comoros": "google.km",
-    "Congo": "google.cg",
-    "Costa Rica": "google.co.cr",
-    "Croatia": "google.hr",
-    "Cuba": "google.com.cu",
-    "Cyprus": "google.com.cy",
-    "Czechia": "google.cz",
-    "Denmark": "google.dk",
-    "Djibouti": "google.dj",
-    "Dominica": "google.dm",
-    "Dominican Republic": "google.com.do",
-    "Ecuador": "google.com.ec",
-    "Egypt": "google.com.eg",
-    "El Salvador": "google.com.sv",
-    "Equatorial Guinea": "google.gq",
-    "Eritrea": "google.er",
-    "Estonia": "google.ee",
-    "Eswatini": "google.co.sz",
-    "Ethiopia": "google.com.et",
-    "Fiji": "google.com.fj",
-    "Finland": "google.fi",
-    "France": "google.fr",
-    "Gabon": "google.ga",
-    "Gambia": "google.gm",
-    "Georgia": "google.ge",
-    "Germany": "google.de",
-    "Ghana": "google.com.gh",
-    "Greece": "google.gr",
-    "Grenada": "google.gd",
-    "Guatemala": "google.com.gt",
-    "Guinea": "google.gn",
-    "Guinea-Bissau": "google.gw",
-    "Guyana": "google.gy",
-    "Haiti": "google.ht",
-    "Honduras": "google.hn",
-    "Hungary": "google.hu",
-    "Iceland": "google.is",
-    "India": "google.co.in",
-    "Indonesia": "google.co.id",
-    "Iran": "google.ir",
-    "Iraq": "google.iq",
-    "Ireland": "google.ie",
-    "Israel": "google.co.il",
-    "Italy": "google.it",
-    "Jamaica": "google.com.jm",
-    "Japan": "google.co.jp",
-    "Jordan": "google.jo",
-    "Kazakhstan": "google.kz",
-    "Kenya": "google.co.ke",
-    "Kiribati": "google.ki",
-    "Kuwait": "google.com.kw",
-    "Kyrgyzstan": "google.kg",
-    "Laos": "google.la",
-    "Latvia": "google.lv",
-    "Lebanon": "google.com.lb",
-    "Lesotho": "google.co.ls",
-    "Liberia": "google.com.lr",
-    "Libya": "google.com.ly",
-    "Liechtenstein": "google.li",
-    "Lithuania": "google.lt",
-    "Luxembourg": "google.lu",
-    "Madagascar": "google.mg",
-    "Malawi": "google.mw",
-    "Malaysia": "google.com.my",
-    "Maldives": "google.mv",
-    "Mali": "google.ml",
-    "Malta": "google.com.mt",
-    "Marshall Islands": "google.mh",
-    "Mauritania": "google.mr",
-    "Mauritius": "google.mu",
-    "Mexico": "google.com.mx",
-    "Micronesia": "google.fm",
-    "Moldova": "google.md",
-    "Monaco": "google.mc",
-    "Mongolia": "google.mn",
-    "Montenegro": "google.me",
-    "Morocco": "google.co.ma",
-    "Mozambique": "google.co.mz",
-    "Myanmar": "google.com.mm",
-    "Namibia": "google.com.na",
-    "Nauru": "google.nr",
-    "Nepal": "google.com.np",
-    "Netherlands": "google.nl",
-    "New Zealand": "google.co.nz",
-    "Nicaragua": "google.com.ni",
-    "Niger": "google.ne",
-    "Nigeria": "google.com.ng",
-    "North Korea": "google.kp",
-    "North Macedonia": "google.mk",
-    "Norway": "google.no",
-    "Oman": "google.com.om",
-    "Pakistan": "google.com.pk",
-    "Palau": "google.pw",
-    "Panama": "google.com.pa",
-    "Papua New Guinea": "google.com.pg",
-    "Paraguay": "google.com.py",
-    "Peru": "google.com.pe",
-    "Philippines": "google.com.ph",
-    "Poland": "google.pl",
-    "Portugal": "google.pt",
-    "Qatar": "google.com.qa",
-    "Romania": "google.ro",
-    "Russia": "google.ru",
-    "Rwanda": "google.rw",
-    "Saint Kitts and Nevis": "google.com.kn",
-    "Saint Lucia": "google.com.lc",
-    "Saint Vincent and the Grenadines": "google.com.vc",
-    "Samoa": "google.ws",
-    "San Marino": "google.sm",
-    "Sao Tome and Principe": "google.st",
-    "Saudi Arabia": "google.com.sa",
-    "Senegal": "google.sn",
-    "Serbia": "google.rs",
-    "Seychelles": "google.sc",
-    "Sierra Leone": "google.com.sl",
-    "Singapore": "google.com.sg",
-    "Slovakia": "google.sk",
-    "Slovenia": "google.si",
-    "Solomon Islands": "google.com.sb",
-    "Somalia": "google.so",
-    "South Africa": "google.co.za",
-    "South Korea": "google.co.kr",
-    "Spain": "google.es",
-    "Sri Lanka": "google.lk",
-    "Sudan": "google.sd",
-    "Suriname": "google.sr",
-    "Sweden": "google.se",
-    "Switzerland": "google.ch",
-    "Syria": "google.sy",
-    "Taiwan": "google.com.tw",
-    "Tajikistan": "google.tj",
-    "Tanzania": "google.co.tz",
-    "Thailand": "google.co.th",
-    "Togo": "google.tg",
-    "Tonga": "google.to",
-    "Trinidad and Tobago": "google.tt",
-    "Tunisia": "google.tn",
-    "Turkey": "google.com.tr",
-    "Turkmenistan": "google.tm",
-    "Tuvalu": "google.tv",
-    "Uganda": "google.co.ug",
-    "Ukraine": "google.com.ua",
-    "United Arab Emirates": "google.ae",
-    "United Kingdom": "google.co.uk",
-    "United States": "google.com",
-    "Uruguay": "google.com.uy",
-    "Uzbekistan": "google.co.uz",
-    "Vanuatu": "google.vu",
-    "Vatican City": "google.va",
-    "Venezuela": "google.co.ve",
-    "Vietnam": "google.com.vn",
-    "Yemen": "google.com.ye",
-    "Zambia": "google.co.zm",
-    "Zimbabwe": "google.co.zw" 
+    "afghanistan": "google.com.af",
+    "albania": "google.al",
+    "algeria": "google.dz",
+    "andorra": "google.ad",
+    "angola": "google.co.ao",
+    "argentina": "google.com.ar",
+    "armenia": "google.am",
+    "australia": "google.com.au",
+    "austria": "google.at",
+    "azerbaijan": "google.az",
+    "bahrain": "google.com.bh",
+    "bangladesh": "google.com.bd",
+    "belarus": "google.by",
+    "belgium": "google.be",
+    "belize": "google.com.bz",
+    "benin": "google.bj",
+    "bhutan": "google.bt",
+    "bolivia": "google.com.bo",
+    "bosnia and herzegovina": "google.ba",
+    "botswana": "google.co.bw",
+    "brazil": "google.com.br",
+    "brunei": "google.com.bn",
+    "bulgaria": "google.bg",
+    "burkina faso": "google.bf",
+    "burundi": "google.bi",
+    "cambodia": "google.com.kh",
+    "cameroon": "google.cm",
+    "canada": "google.ca",
+    "cape verde": "google.cv",
+    "chad": "google.td",
+    "chile": "google.cl",
+    "china": "google.cn",
+    "colombia": "google.com.co",
+    "congo": "google.cg",
+    "costa rica": "google.co.cr",
+    "croatia": "google.hr",
+    "cuba": "google.com.cu",
+    "cyprus": "google.com.cy",
+    "czech republic": "google.cz",
+    "denmark": "google.dk",
+    "djibouti": "google.dj",
+    "dominican republic": "google.com.do",
+    "ecuador": "google.com.ec",
+    "egypt": "google.com.eg",
+    "el salvador": "google.com.sv",
+    "estonia": "google.ee",
+    "ethiopia": "google.com.et",
+    "fiji": "google.com.fj",
+    "finland": "google.fi",
+    "france": "google.fr",
+    "gabon": "google.ga",
+    "gambia": "google.gm",
+    "georgia": "google.ge",
+    "germany": "google.de",
+    "ghana": "google.com.gh",
+    "greece": "google.gr",
+    "guatemala": "google.com.gt",
+    "guinea": "google.gn",
+    "haiti": "google.ht",
+    "honduras": "google.hn",
+    "hong kong": "google.com.hk",
+    "hungary": "google.hu",
+    "iceland": "google.is",
+    "india": "google.co.in",
+    "indonesia": "google.co.id",
+    "iran": "google.com.ir",
+    "iraq": "google.iq",
+    "ireland": "google.ie",
+    "israel": "google.co.il",
+    "italy": "google.it",
+    "jamaica": "google.com.jm",
+    "japan": "google.co.jp",
+    "jordan": "google.jo",
+    "kazakhstan": "google.kz",
+    "kenya": "google.co.ke",
+    "kuwait": "google.com.kw",
+    "kyrgyzstan": "google.kg",
+    "laos": "google.la",
+    "latvia": "google.lv",
+    "lebanon": "google.com.lb",
+    "libya": "google.com.ly",
+    "liechtenstein": "google.li",
+    "lithuania": "google.lt",
+    "luxembourg": "google.lu",
+    "macedonia": "google.mk",
+    "madagascar": "google.mg",
+    "malawi": "google.mw",
+    "malaysia": "google.com.my",
+    "maldives": "google.mv",
+    "mali": "google.ml",
+    "malta": "google.com.mt",
+    "mauritania": "google.mr",
+    "mauritius": "google.mu",
+    "mexico": "google.com.mx",
+    "moldova": "google.md",
+    "monaco": "google.mc",
+    "mongolia": "google.mn",
+    "montenegro": "google.me",
+    "morocco": "google.co.ma",
+    "mozambique": "google.co.mz",
+    "myanmar": "google.com.mm",
+    "namibia": "google.com.na",
+    "nepal": "google.com.np",
+    "netherlands": "google.nl",
+    "new zealand": "google.co.nz",
+    "nicaragua": "google.com.ni",
+    "niger": "google.ne",
+    "nigeria": "google.com.ng",
+    "norway": "google.no",
+    "oman": "google.com.om",
+    "pakistan": "google.com.pk",
+    "panama": "google.com.pa",
+    "paraguay": "google.com.py",
+    "peru": "google.com.pe",
+    "philippines": "google.com.ph",
+    "poland": "google.pl",
+    "portugal": "google.pt",
+    "puerto rico": "google.com.pr",
+    "qatar": "google.com.qa",
+    "romania": "google.ro",
+    "russia": "google.ru",
+    "rwanda": "google.rw",
+    "saudi arabia": "google.com.sa",
+    "senegal": "google.sn",
+    "serbia": "google.rs",
+    "singapore": "google.com.sg",
+    "slovakia": "google.sk",
+    "slovenia": "google.si",
+    "south africa": "google.co.za",
+    "south korea": "google.co.kr",
+    "spain": "google.es",
+    "sri lanka": "google.lk",
+    "sudan": "google.com.sd",
+    "sweden": "google.se",
+    "switzerland": "google.ch",
+    "syria": "google.sy",
+    "taiwan": "google.com.tw",
+    "tajikistan": "google.com.tj",
+    "tanzania": "google.co.tz",
+    "thailand": "google.co.th",
+    "tunisia": "google.tn",
+    "turkey": "google.com.tr",
+    "turkmenistan": "google.tm",
+    "uganda": "google.co.ug",
+    "ukraine": "google.com.ua",
+    "united arab emirates": "google.ae",
+    "united kingdom": "google.co.uk",
+    "united states": "google.com",
+    "uruguay": "google.com.uy",
+    "uzbekistan": "google.co.uz",
+    "venezuela": "google.co.ve",
+    "vietnam": "google.com.vn",
+    "yemen": "google.com.ye",
+    "zambia": "google.co.zm",
+    "zimbabwe": "google.co.zw"
 }
 
 country_codes = {
@@ -515,92 +501,7 @@ country_codes = {
     "Zambia": "zm",
     "Zimbabwe": "zw" 
 }
-@app.post("/search/")
-async def search_urls(keyword: str = Form(...), country_name: str = Form(...), pages: int = Form(...)):
-    if country_name not in country_domains or country_name not in country_codes:
-        raise HTTPException(status_code=400, detail=f"Country '{country_name}' is not supported.")
 
-    google_domain = country_domains[country_name]
-    country_code = country_codes[country_name]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36"
-    }
-
-    results = []
-    for page in range(pages):
-        start_index = page * 10
-        params = {
-            "q": keyword,
-            "start": start_index,
-            "num": 10,
-            "gl": country_code,  # Geolocation country code
-            "hl": "en",         # Language
-            "google_domain": google_domain,  # Explicit Google domain
-            "api_key": SERP_API_KEY
-        }
-
-        try:
-            response = requests.get("https://serpapi.com/search", params=params, headers=headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            # Extract URLs from organic results
-            for result in data.get("organic_results", []):
-                results.append(result.get("link"))
-
-        except requests.RequestException as e:
-            raise HTTPException(status_code=500, detail=f"Error while fetching search results: {e}")
-
-        # Respect API rate limits
-        time.sleep(2)
-
-    # Generate Excel
-    file_name =  f"search_results_{keyword.replace(' ', '')}{country_name.replace(' ', '_')}.xlsx"
-    file_path = os.path.join(OUTPUT_DIR, file_name)
-
-    try:
-        workbook = xlsxwriter.Workbook(file_path)
-        worksheet = workbook.add_worksheet()
-
-        # Header formatting
-        header_format = workbook.add_format({"bold": True, "bg_color": "#D7E4BC", "align": "center"})
-        url_format = workbook.add_format({"text_wrap": True, "font_color": "blue", "underline": 1})
-        text_format = workbook.add_format({"align": "center"})
-
-        # Write header
-        worksheet.write(0, 0, "Keyword", header_format)
-        worksheet.write(0, 1, keyword, text_format)
-        worksheet.write(0, 2, "Google Domain", header_format)
-        worksheet.write(0, 3, country_domains[country_name], text_format)
-        worksheet.write(0, 4, "Pages", header_format)
-        worksheet.write(0, 5, pages, text_format)
-        worksheet.write(2, 0, "S NO", header_format)
-        worksheet.write(2, 1, "Backlinks Link", header_format)
-
-        # Write data
-        for i, url in enumerate(results, start=1):
-            worksheet.write(i + 2, 0, i, text_format)  # Serial Number
-            worksheet.write_url(i + 2, 1, url, url_format, string=url)  # Backlinks Link
-
-        # Adjust column widths
-        worksheet.set_column(0, 0, 10)  # S NO
-        worksheet.set_column(1, 1, 100)  # Backlinks Link
-        worksheet.set_column(2, 2, 18)
-        worksheet.set_column(3, 3, 18)
-        workbook.close()
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating Excel file: {e}")
-
-    return {"file_url": f"/files/{file_name}"}
-# Route to serve the generated Excel file
-@app.get("/files/{file_name}")
-async def download_search_file(file_name: str):
-    file_path = os.path.join(OUTPUT_DIR, file_name)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Search file not found.")
-    return FileResponse(file_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=file_name)
 @app.post("/check-rank")
 async def check_rank(domain: str = Form(...), keywords: str = Form(...), country: str = Form(...)):
     # Limit the number of keywords to 500
@@ -685,7 +586,7 @@ async def download_ranking_file(file_name: str):
     return FileResponse(file_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=file_name)
 # Signup Endpoint
 @app.post("/signup/")
-def signup(user: UserCreate, db: Session = Depends(get_db)):
+def signup(user: UserCreate = Body(...), db: Session = Depends(get_db)):
     existing_user = db.query(User).filter(
         (User.email_id == user.email_id) |
         (User.phone_number == user.phone_number) |
@@ -716,24 +617,23 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 # Login Endpoint
 @app.post("/login/")
 def login(user: LoginSchema, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.name == user.name).first()
+    db_user = db.query(User).filter(User.email_id == user.email_id).first()
     if not db_user or not pwd_context.verify(user.password, db_user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid credentials")
-    return {"message": "Login successful", "name": db_user.name}
-
+    return {"message": "Login successful", "email_id": db_user.email_id}
 # Project Management
 @app.post("/projects/")
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     print("Received data:", project.dict()) 
-    user = db.query(User).filter(User.name == project.author).first()
+    user = db.query(User).filter(User.id == project.user_id).first()  # Corrected query
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     db_project = Project(
         project_name=project.project_name,
         project_description=project.project_description,
-        author=project.author,
-        user_id=user.id
+        user_id=user.id  # Correctly assign user_id
     )
     db.add(db_project)
     db.commit()
@@ -748,20 +648,68 @@ def get_projects(username: str,db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     projects = db.query(Project).filter(Project.user_id == user.id).all()
     return projects
-@app.delete("/projects/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    db.delete(project)
-    db.commit()
-    return {"message": "Project deleted successfully"}
+def delete_project(db: Session, project_id: int):
+    try:
+        # Delete URLs, Keywords, and Ranks associated with the project
+        db.query(URL).filter(URL.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(Keyword).filter(Keyword.project_id == project_id).delete(synchronize_session="fetch")
+        db.query(Rank).filter(Rank.project_id == project_id).delete(synchronize_session="fetch")
+
+        # Now delete the project itself
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        db.delete(project)
+        db.commit()
+        
+        return {"message": "Project deleted successfully"}
+
+    except Exception as e:
+        db.rollback()  # Rollback in case of failure
+        raise HTTPException(status_code=500, detail=f"Error deleting project: {str(e)}")
 
 # URL & Keyword Management
-
-# Scheduler
 scheduler = BackgroundScheduler()
+
+@app.put("/edit-project/{project_id}")
+async def edit_project(
+    project_id: int,
+    project_name: str = Form(...),
+    project_description: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return {"error": "Project not found"}
+        
+        project.project_name = project_name
+        project.project_description = project_description
+        db.commit()
+        db.refresh(project)
+        
+        return {"message": "Project updated successfully", "project_id": project.id}
+    except Exception as e:
+        return {"error": str(e)}
+
+SERP_API_KEY = "c833c9f303031dfdb298ae50981f8465d3d085aa263e5948923eff4ab2e9244c"
+
+def get_country_code(country_name: str) -> str:
+    try:
+        country_obj = pycountry.countries.lookup(country_name)
+        return country_obj.alpha_2.lower()  # Convert to lowercase
+    except LookupError:
+        logging.warning(f"⚠️ Invalid country name: {country_name}, defaulting to 'in'")
+        return "in"  # Default to India if invalid
+
+def get_country_details(country_name: str):
+    try:
+        country_obj = pycountry.countries.lookup(country_name)
+        return country_obj.name, country_obj.alpha_2.lower()  # Full name & code
+    except LookupError:
+        logging.warning(f"⚠️ Invalid country name: {country_name}, defaulting to 'India'")
+        return "India", "in"  # Default to India
 
 @app.post("/track-rank")
 async def track_rank(
@@ -773,109 +721,183 @@ async def track_rank(
 ):
     try:
         keyword_list = [k.strip() for k in keywords.split(",")[:500]]
+        country_name, country_code = get_country_details(country.strip())  # Get full name & code
 
-        # Get correct Google domain based on country
-        country_lower = country.lower().strip()
-        google_domain = COUNTRY_GOOGLE_DOMAINS.get(country_lower, "google.com")  # Default to google.com
-
+        # Ensure the URL exists in the project
         existing_url = db.query(URL).filter(URL.url == domain, URL.project_id == project_id).first()
         if not existing_url:
-            existing_url = URL(url=domain, project_id=project_id)
+            existing_url = URL(url=domain, project_id=project_id, country=country_code)
             db.add(existing_url)
             db.commit()
             db.refresh(existing_url)
 
+        results = []
         for keyword in keyword_list:
+            # Check if keyword exists
             existing_keyword = db.query(Keyword).filter(
-                Keyword.keyword == keyword, Keyword.project_id == project_id
+                Keyword.keyword == keyword,
+                Keyword.url_id == existing_url.id
             ).first()
+
             if not existing_keyword:
-                existing_keyword = Keyword(keyword=keyword, project_id=project_id)
+                existing_keyword = Keyword(
+                    keyword=keyword,
+                    project_id=project_id,
+                    url_id=existing_url.id
+                )
                 db.add(existing_keyword)
                 db.commit()
                 db.refresh(existing_keyword)
 
-            # Fetch rank from SerpAPI using the correct country Google domain
-            serp_api_key = "serp_api_key"
-            search_url = f"https://serpapi.com/search?api_key={serp_api_key}&q={quote_plus(keyword)}&hl=en&gl={country_lower}&num=100&google_domain={google_domain}"
-            
+            # Fetch latest rank if available
+            latest_rank = db.query(Rank).filter(
+                Rank.keyword_id == existing_keyword.id,
+                Rank.url_id == existing_url.id,
+                Rank.project_id == project_id
+            ).order_by(Rank.date.desc()).first()
+
+            if latest_rank:
+                results.append({
+                    "keyword": keyword,
+                    "rank": latest_rank.ranks,
+                    "page_number": latest_rank.page_number,
+                    "country": country_name,  
+                    "date": latest_rank.date.strftime("%Y-%m-%d")
+                })
+                continue
+
+            # Fetch Rank from SerpAPI
+            search_url = f"https://serpapi.com/search?api_key={SERP_API_KEY}&q={quote_plus(keyword)}&hl=en&gl={country_code}&num=100"
             response = requests.get(search_url)
-            
-            if response.status_code != 200:
-                return {"error": "Failed to fetch data from SerpAPI"}
 
-            data = response.json()
-            
-            rank = -1
-            page_number = -1
+            if response.status_code == 200:
+                data = response.json()
+                rank = -1
+                page_number = -1
 
-            if "organic_results" in data:
-                for i, result in enumerate(data["organic_results"], start=1):
-                    result_url = result.get("link", "").strip()
-                    if not result_url:
-                        continue  # Skip if no link available
+                if "organic_results" in data:
+                    for i, result in enumerate(data["organic_results"], start=1):
+                        parsed_result_url = urlparse(result.get("link", "")).netloc.replace("www.", "")
+                        parsed_stored_url = urlparse(domain).netloc.replace("www.", "")
 
-                    parsed_result_url = urlparse(result_url).netloc.replace("www.", "")
-                    parsed_stored_url = urlparse(domain).netloc.replace("www.", "")
+                        if parsed_stored_url in parsed_result_url:
+                            rank = i
+                            page_number = (i - 1) // 10 + 1
+                            break
 
-                    if parsed_stored_url in parsed_result_url:
-                        rank = i
-                        page_number = (i - 1) // 10 + 1
-                        break
+                # Store rank in database
+                new_rank = Rank(
+                    url_id=existing_url.id,
+                    keyword_id=existing_keyword.id,
+                    project_id=project_id,
+                    ranks=rank,
+                    page_number=page_number,
+                    country=country_code,
+                    date=datetime.utcnow()
+                )
+                db.add(new_rank)
+                db.commit()
 
-            # Save the rank in the database
+                results.append({
+                    "keyword": keyword,
+                    "rank": rank,
+                    "page_number": page_number,
+                    "country": country_name,  
+                    "date": datetime.utcnow().strftime("%Y-%m-%d")
+                })
+            else:
+                results.append({
+                    "keyword": keyword,
+                    "error": f"Failed to fetch ranking: {response.status_code}"
+                })
+
+        return {"data": results}
+    except Exception as e:
+        logging.error(f"Error in /track-rank: {str(e)}")
+        return {"error": str(e)}
+
+#  Scheduler to run daily at 6:00 AM
+def update_ranks():
+    db = SessionLocal()
+    urls = db.query(URL).all()
+
+    for url in urls:
+        for keyword in url.keywords:
+            print(f" Checking Rank for: {url.url} - {keyword.keyword}")
+
+            country_name, country_code = get_country_details(url.country if url.country else "United States")
+
+            search_url = f"https://serpapi.com/search?api_key={SERP_API_KEY}&q={keyword.keyword}&hl=en&gl={country_code}&num=100"
+            response = requests.get(search_url).json()
+
+            rank = None
+            page_number = None
+            for i, result in enumerate(response.get("organic_results", []), start=1):
+                if url.url in result.get("link", ""):
+                    rank = i
+                    page_number = (i - 1) // 10 + 1
+                    print(f" Rank Found: {rank} (Page {page_number})")
+                    break
+
+            if rank is None:
+                print(f" No Rank Found for {keyword.keyword}")
+
+            # Store rank in DB
             new_rank = Rank(
-                url_id=existing_url.id,
-                keyword_id=existing_keyword.id,
-                project_id=project_id,
-                ranks=rank,
-                page_number=page_number,
-                country=country_lower,
+                url_id=url.id,
+                keyword_id=keyword.id,
+                project_id=url.project_id,
+                ranks=rank or -1,
+                page_number=page_number or -1,
+                country=country_code,
                 date=datetime.utcnow()
             )
             db.add(new_rank)
             db.commit()
+            print(f"Rank inserted: {url.url} - {keyword.keyword} => Rank: {rank} (Page {page_number})")
 
-        return {"message": "Tracking initialized and rankings updated"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def update_ranks():
-    db = SessionLocal()
-    try:
-        projects = db.query(Project).all()
-        for project in projects:
-            urls = db.query(URL).filter(URL.project_id == project.id).all()
-            for url in urls:
-                keywords = db.query(Keyword).filter(Keyword.project_id == project.id).all()
-                for keyword in keywords:
-                    track_rank(project_id=project.id, domain=url.url, keywords=keyword.keyword, country="india", db=db)
-    finally:
-        db.close()
-
+    db.close()
 
 scheduler.add_job(update_ranks, 'cron', hour=6, minute=0)
 scheduler.start()
-print(" Scheduler started! Runs daily at 6:00 AM.")
+print("Scheduler started! Runs daily at 6:00 AM.")
 
-@app.post("/update-ranks")
+@app.post("/manual-update-ranks")
 def manual_update_ranks():
     try:
         update_ranks()
-        return {"message": "Ranks updated successfully"}
+        return {"message": "Ranks updated manually"}
     except Exception as e:
         return {"error": str(e)}
 
 @app.get("/get-ranks")
 async def get_ranks(project_id: int, db: Session = Depends(get_db)):
-    ranks = db.query(Rank).filter(Rank.project_id == project_id).all()
-    if not ranks:
-        return {"message": "No rank data found"}
+    try:
+        ranks = db.query(Rank).filter(Rank.project_id == project_id).all()
 
-    result = [{"url": rank.url.url, "keyword": rank.keyword.keyword, "ranks": rank.ranks, "page_number": rank.page_number, "country": rank.country, "date": rank.date.strftime("%Y-%m-%d")} for rank in ranks]
+        if not ranks:
+            return {"message": "No rank data found"}
 
-    return result
+        result = []
+        for rank in ranks:
+            url = db.query(URL).filter(URL.id == rank.url_id).first()
+            keyword = db.query(Keyword).filter(Keyword.id == rank.keyword_id).first()
+
+            # Convert stored country code back to full country name
+            country_name, _ = get_country_details(rank.country)
+
+            result.append({
+                "url": url.url if url else "Deleted URL",
+                "keyword": keyword.keyword if keyword else "Deleted Keyword",
+                "ranks": rank.ranks,
+                "page_number": rank.page_number,
+                "country": country_name,  
+                "date": rank.date.strftime("%Y-%m-%d")
+            })
+
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/add-keywords")
 async def add_keywords(
@@ -888,113 +910,438 @@ async def add_keywords(
     try:
         keyword_list = [k.strip() for k in keywords.split(",")[:500]]
         country_lower = country.lower().strip()
-        google_domain = COUNTRY_GOOGLE_DOMAINS.get(country_lower, "google.com")
+        google_domain = country_domains.get(country_lower, "google.com")
 
+        # Ensure the URL exists
         existing_url = db.query(URL).filter(URL.url == domain, URL.project_id == project_id).first()
         if not existing_url:
             return {"error": "URL not found in the project"}
 
+        serp_api_key = "serp_api_key"
+        added_keywords = []
+
         for keyword in keyword_list:
+            # Check if keyword already exists for this project & URL
             existing_keyword = db.query(Keyword).filter(
-                Keyword.keyword == keyword, Keyword.project_id == project_id
+                Keyword.keyword == keyword,
+                Keyword.project_id == project_id,
+                Keyword.url_id == existing_url.id  
             ).first()
-            if existing_keyword:
-                # Insert a new entry with the same URL but a new keyword
-                new_entry = Rank(
-                    url_id=existing_url.id,
-                    keyword_id=existing_keyword.id,
+
+            if not existing_keyword:
+                new_keyword = Keyword(
+                    keyword=keyword,
                     project_id=project_id,
-                    country=country_lower,
-                    date=datetime.utcnow()
+                    url_id=existing_url.id  
                 )
-                db.add(new_entry)
-                db.commit()
-                db.refresh(new_entry)
-                return {"message": "New keyword added for the existing URL", "id": new_entry.id}
-            else:
-                # Create new keyword and then add rank entry
-                new_keyword = Keyword(keyword=keyword, project_id=project_id)
                 db.add(new_keyword)
                 db.commit()
                 db.refresh(new_keyword)
+                added_keywords.append(new_keyword)
 
-                new_entry = Rank(
-                    url_id=existing_url.id,
-                    keyword_id=new_keyword.id,
-                    project_id=project_id,
-                    country=country_lower,
-                    date=datetime.utcnow()
-                )
-                db.add(new_entry)
-                db.commit()
-                db.refresh(new_entry)
-                return {"message": "New keyword added for the existing URL", "id": new_entry.id}
+                # Fetch rank immediately using SerpAPI
+                search_url = f"https://serpapi.com/search?api_key={serp_api_key}&q={quote_plus(keyword)}&hl=en&gl={country_lower}&num=100&google_domain={google_domain}"
+                response = requests.get(search_url)
 
-        return {"message": "Keywords added successfully"}
+                if response.status_code == 200:
+                    data = response.json()
+                    rank = -1
+                    page_number = -1
+
+                    if "organic_results" in data:
+                        for i, result in enumerate(data["organic_results"], start=1):
+                            result_url = result.get("link", "").strip()
+                            if not result_url:
+                                continue
+
+                            parsed_result_url = urlparse(result_url).netloc.replace("www.", "")
+                            parsed_stored_url = urlparse(domain).netloc.replace("www.", "")
+
+                            if parsed_stored_url in parsed_result_url:
+                                rank = i
+                                page_number = (i - 1) // 10 + 1
+                                break
+
+                    new_rank = Rank(
+                        url_id=existing_url.id,
+                        keyword_id=new_keyword.id,
+                        project_id=project_id,
+                        ranks=rank,
+                        page_number=page_number,
+                        country=country_lower,
+                        date=datetime.utcnow()
+                    )
+                    db.add(new_rank)
+                    db.commit()
+
+        return {"message": f"{len(added_keywords)} new keywords added"}
+
     except Exception as e:
         return {"error": str(e)}
-
-
-
-
-
-
-# Get stored ranks (Supports multiple keywords correctly)
-@app.get("/get-ranks")
-async def get_ranks(db: Session = Depends(get_db)):
-    try:
-        ranks = db.query(Rank).all()
-
-        if not ranks:
-            print(" No rank data found in database!")
-            return {"message": "No rank data found"}
-
-        result = []
-        for rank in ranks:
-            url = db.query(URL).filter(URL.id == rank.url_id).first()
-            keyword = db.query(Keyword).filter(Keyword.id == rank.keyword_id).first()
-
-            result.append({
-                "url": url.url if url else "Deleted URL",
-                "keyword": keyword.keyword if keyword else "Deleted Keyword",
-                "ranks": rank.ranks,
-                "page_number": rank.page_number,
-                "date": rank.date.strftime("%Y-%m-%d")
-            })
-
-        print(" Ranks Fetched Successfully")
-        return result
-    except Exception as e:
-        print(f"ERROR in /get-ranks: {e}")
-        return {"error": str(e)}
-
-@app.get("/visualize-ranks")
-async def visualize_ranks(db: Session = Depends(get_db)):
-    try:
-        ranks = db.query(Rank).all()
-        if not ranks:
-            return {"message": "No rank data available"}
-
-        result = []
-        for rank in ranks:
-            url = db.query(URL).filter(URL.id == rank.url_id).first()
-            keyword = db.query(Keyword).filter(Keyword.id == rank.keyword_id).first()
-
-            result.append({
-                "url": url.url if url else "Deleted URL",
-                "keyword": keyword.keyword if keyword else "Deleted Keyword",
-                "ranks": rank.ranks,
-                "page_number": rank.page_number,
-                "checked_at": rank.date.strftime("%Y-%m-%d")
-            })
-
-        return result  
-    except Exception as e:
-        return {"error": str(e)}
-router = APIRouter()
 
 # Run Migrations
 Base.metadata.create_all(bind=engine)
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the Keyword Rank Tracker API!"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/get-keywords")
+async def get_keywords(
+    project_id: int,
+    domain: str,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Ensure the URL exists
+        existing_url = db.query(URL).filter(URL.url == domain, URL.project_id == project_id).first()
+        if not existing_url:
+            return {"error": "URL not found in the project"}
+
+        # Fetch keywords for the given project and URL
+        keywords = db.query(Keyword).filter(
+            Keyword.project_id == project_id,
+            Keyword.url_id == existing_url.id
+        ).all()
+
+        if not keywords:
+            return {"message": "No keywords found for this project and URL"}
+
+        return [
+            {"keyword_id": k.id, "keyword": k.keyword, "url_id": k.url_id} for k in keywords
+        ]
+
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/delete-keyword/{keyword_id}")
+async def delete_keyword(
+    keyword_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Find the keyword
+        keyword = db.query(Keyword).filter(Keyword.id == keyword_id).first()
+        if not keyword:
+            return {"error": "Keyword not found"}
+
+        # Delete related rankings
+        db.query(Rank).filter(Rank.keyword_id == keyword_id).delete()
+
+        # Delete the keyword
+        db.delete(keyword)
+        db.commit()
+
+        return {"message": "Keyword and associated rankings deleted successfully"}
+
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get("/live-rank")
+async def get_live_rank(project_id: int, db: Session = Depends(get_db)):
+    try:
+        # Step 1: Get keywords and URLs for the project
+        keywords = db.query(Keyword).filter(Keyword.project_id == project_id).all()
+        urls = db.query(URL).filter(URL.project_id == project_id).all()
+        project = db.query(Project).filter(Project.id == project_id).first()
+
+        if not project or not keywords or not urls:
+            raise HTTPException(status_code=404, detail="Project, URLs, or Keywords not found")
+
+        country = project.country  # assuming you store it (like 'in' or 'us')
+
+        results = []
+        for keyword in keywords:
+            for url in urls:
+                # Step 2: Fetch live rank from SerpAPI
+                serp_api_key = "serp_api_key"  
+                params = {
+                    "api_key": serp_api_key,
+                    "q": keyword.keyword,
+                    "gl": country,
+                    "hl": "en",
+                    "num": "100",
+                    "engine": "google"
+                }
+
+                response = requests.get("https://serpapi.com/search", params=params)
+                data = response.json()
+
+                # Step 3: Search through results to find rank
+                position = None
+                page_number = None
+                for index, result in enumerate(data.get("organic_results", []), start=1):
+                    if url.url in result.get("link", ""):
+                        position = index
+                        page_number = (index - 1) // 10 + 1
+                        break
+
+                results.append({
+                    "keyword": keyword.keyword,
+                    "url": url.url,
+                    "rank": position if position else "Not found",
+                    "page_number": page_number if page_number else "N/A",
+                    "checked_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+        return {"project_id": project_id, "live_results": results}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/get-1-day-rank")
+async def get_1_day_rank(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Set date range: start of yesterday to start of today
+        today = datetime.utcnow().date()
+        start_of_yesterday = datetime.combine(today - timedelta(days=1), datetime.min.time())
+        start_of_today = datetime.combine(today, datetime.min.time())
+
+        rank_data = (
+            db.query(Rank, Keyword, URL)
+            .join(Keyword, Rank.keyword_id == Keyword.id)
+            .join(URL, Rank.url_id == URL.id)
+            .filter(
+                Rank.project_id == project_id,
+                Rank.date >= start_of_yesterday,
+                Rank.date < start_of_today  # Exclude today's data
+            )
+            .order_by(Rank.date.desc())
+            .all()
+        )
+
+        results = []
+        for rank, keyword, url in rank_data:
+            results.append({
+                "keyword": keyword.keyword,
+                "domain": url.url,
+                "rank": rank.ranks,
+                "page_number": rank.page_number,
+                "country": rank.country,
+                "date": rank.date.strftime("%Y-%m-%d")
+            })
+
+        return {"data": results}
+
+    except Exception as e:
+        logging.error(f"Error in /get-1-day-rank: {str(e)}")
+        return {"error": str(e)}
+
+@app.get("/get-7-days-rank")
+async def get_7_days_rank(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+ 
+        rank_data = (
+            db.query(Rank, Keyword, URL)
+            .join(Keyword, Rank.keyword_id == Keyword.id)  # Explicit join
+            .join(URL, Rank.url_id == URL.id)  # Explicit join
+            .filter(
+                Rank.project_id == project_id,
+                Rank.date >= seven_days_ago
+            )
+            .order_by(Rank.date.desc())
+            .all()
+        )
+
+        results = []
+        for rank, keyword, url in rank_data:
+            results.append({
+                "keyword": keyword.keyword,
+                "domain": url.url,  # Correctly getting URL
+                "rank": rank.ranks,
+                "page_number": rank.page_number,
+                "country": rank.country,
+                "date": rank.date.strftime("%Y-%m-%d")
+            })
+
+        return {"data": results}
+
+    except Exception as e:
+        logging.error(f"Error in /get-7-days-rank: {str(e)}")
+        return {"error": str(e)}
+
+@app.get("/get-30-days-rank")
+async def get_30_days_rank(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+
+        # Step 1: Fetch rank data from the last 30 days with explicit joins
+        rank_data = (
+            db.query(Rank, Keyword, URL)
+            .select_from(Rank)
+            .join(Keyword, Rank.keyword_id == Keyword.id)
+            .join(URL, Rank.url_id == URL.id)
+            .filter(
+                Rank.project_id == project_id,
+                Rank.date >= thirty_days_ago
+            )
+            .order_by(Rank.date.desc())
+            .all()
+        )
+
+        if rank_data:
+            results = []
+            for rank, keyword, url in rank_data:
+                results.append({
+                    "keyword": keyword.keyword,
+                    "domain": url.url,
+                    "rank": rank.ranks,
+                    "page_number": rank.page_number,
+                    "country": rank.country,
+                    "date": rank.date.strftime("%Y-%m-%d")
+                })
+            return {"data": results}
+
+        # Step 2: Fallback to latest tracked data
+        last_tracked_data = (
+            db.query(Rank, Keyword, URL)
+            .select_from(Rank)
+            .join(Keyword, Rank.keyword_id == Keyword.id)
+            .join(URL, Rank.url_id == URL.id)
+            .filter(Rank.project_id == project_id)
+            .order_by(Rank.date.desc())
+            .all()
+        )
+
+        if last_tracked_data:
+            results = []
+            for rank, keyword, url in last_tracked_data:
+                results.append({
+                    "keyword": keyword.keyword,
+                    "domain": url.url,
+                    "rank": rank.ranks,
+                    "page_number": rank.page_number,
+                    "country": rank.country,
+                    "date": rank.date.strftime("%Y-%m-%d")
+                })
+            return {
+                "data": results,
+                "message": "No rank in last 30 days. Returning the last tracked data."
+            }
+
+        # Step 3: No data at all
+        return {"data": [], "message": "No ranking data available for this project."}
+
+    except Exception as e:
+        logging.error(f"Error in /get-30-days-rank: {str(e)}")
+        return {"error": str(e)}
+from typing import List
+from fastapi import Body
+
+@app.delete("/delete-keywords")
+async def delete_keywords(
+    keyword_ids: List[int] = Body(...),  # Accept list of IDs in the request body
+    db: Session = Depends(get_db)
+):
+    try:
+        # Get the keywords from DB
+        keywords = db.query(Keyword).filter(Keyword.id.in_(keyword_ids)).all()
+        
+        if not keywords:
+            raise HTTPException(status_code=404, detail="No keywords found with the given IDs")
+
+        # Delete related rankings
+        db.query(Rank).filter(Rank.keyword_id.in_(keyword_ids)).delete(synchronize_session=False)
+
+        # Delete the keywords
+        for keyword in keywords:
+            db.delete(keyword)
+
+        db.commit()
+
+        return {"message": "Keywords and associated rankings deleted successfully"}
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+class URLDeleteRequest(BaseModel):
+    url_ids: list[int]
+
+@app.delete("/delete-urls")
+async def delete_urls(request: URLDeleteRequest, db: Session = Depends(get_db)):
+    try:
+        # Delete all related ranks for these URLs
+        db.query(Rank).filter(Rank.url_id.in_(request.url_ids)).delete(synchronize_session=False)
+
+        # Delete the URLs themselves
+        db.query(URL).filter(URL.id.in_(request.url_ids)).delete(synchronize_session=False)
+
+        db.commit()
+        return {"message": "URLs and associated rankings deleted successfully"}
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/live-rank")
+async def get_live_rank(project_id: int, db: Session = Depends(get_db)):
+    try:
+        # Fetch project, keywords, and URLs
+        project = db.query(Project).filter(Project.id == project_id).first()
+        keywords = db.query(Keyword).filter(Keyword.project_id == project_id).all()
+        urls = db.query(URL).filter(URL.project_id == project_id).all()
+
+        if not project or not keywords or not urls:
+            raise HTTPException(status_code=404, detail="Project, URLs, or Keywords not found")
+
+        if not project.country:
+            raise HTTPException(status_code=400, detail="Project does not have a country assigned")
+
+        country = project.country.lower()
+
+        results = []
+        for keyword in keywords:
+            for url in urls:
+                serp_api_key = "c833c9f303031dfdb298ae50981f8465d3d085aa263e5948923eff4ab2e9244c"
+                params = {
+                    "api_key": serp_api_key,
+                    "q": keyword.keyword,
+                    "gl": country,
+                    "hl": "en",
+                    "num": "100",
+                    "engine": "google"
+                }
+
+                response = requests.get("https://serpapi.com/search", params=params)
+                data = response.json()
+
+                position = None
+                page_number = None
+                for index, result in enumerate(data.get("organic_results", []), start=1):
+                    if url.url in result.get("link", ""):
+                        position = index
+                        page_number = (index - 1) // 10 + 1
+                        break
+
+                results.append({
+                    "keyword": keyword.keyword,
+                    "url": url.url,
+                    "rank": position if position else "Not found",
+                    "page_number": page_number if page_number else "N/A",
+                    "checked_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+        return {"project_id": project_id, "country": country, "live_results": results}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+Required packages 
+Pip install fastapi, uvicorn[standard] ,sqlalchemy ,passlib[bcrypt] ,pydantic ,apscheduler ,bcrypt ,requests
+Xlsxwriter ,openpyxl ,jinja2 ,python-multipart ,iso3166 ,pycountry
+
+
+
