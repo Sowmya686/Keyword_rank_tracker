@@ -700,7 +700,7 @@ def get_country_code(country_name: str) -> str:
         country_obj = pycountry.countries.lookup(country_name)
         return country_obj.alpha_2.lower()  # Convert to lowercase
     except LookupError:
-        logging.warning(f"⚠️ Invalid country name: {country_name}, defaulting to 'in'")
+        logging.warning(f"Invalid country name: {country_name}, defaulting to 'in'")
         return "in"  # Default to India if invalid
 
 def get_country_details(country_name: str):
@@ -708,7 +708,7 @@ def get_country_details(country_name: str):
         country_obj = pycountry.countries.lookup(country_name)
         return country_obj.name, country_obj.alpha_2.lower()  # Full name & code
     except LookupError:
-        logging.warning(f"⚠️ Invalid country name: {country_name}, defaulting to 'India'")
+        logging.warning(f"Invalid country name: {country_name}, defaulting to 'India'")
         return "India", "in"  # Default to India
 
 @app.post("/track-rank")
@@ -1305,7 +1305,7 @@ async def get_live_rank(project_id: int, db: Session = Depends(get_db)):
         results = []
         for keyword in keywords:
             for url in urls:
-                serp_api_key = "c833c9f303031dfdb298ae50981f8465d3d085aa263e5948923eff4ab2e9244c"
+                serp_api_key = "serp_api_key"
                 params = {
                     "api_key": serp_api_key,
                     "q": keyword.keyword,
